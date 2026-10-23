@@ -2,6 +2,7 @@
 #include "cloud_provider.h"
 
 #include <cstdio>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -189,8 +190,15 @@ static void PairingCodeTests() {
     CHECK(code.empty(), "failed normalization clears the output");
 
     CHECK(Cabinet::PairingDeviceName("steamdeck\n") == "steamdeck", "hostname is trimmed");
-    CHECK(Cabinet::PairingDeviceName("") == "Steam Deck", "empty hostname falls back to Steam Deck");
-    CHECK(Cabinet::PairingDeviceName(" \t") == "Steam Deck", "blank hostname falls back to Steam Deck");
+#ifdef _WIN32
+    const std::string defaultDeviceName = "Windows PC";
+#else
+    const std::string defaultDeviceName = "Steam Deck";
+#endif
+    CHECK(Cabinet::PairingDeviceName("") == defaultDeviceName,
+          "empty hostname falls back to the platform device name");
+    CHECK(Cabinet::PairingDeviceName(" \t") == defaultDeviceName,
+          "blank hostname falls back to the platform device name");
     CHECK(Cabinet::PairingDeviceName(std::string(150, 'h')) == std::string(100, 'h'),
           "device name is capped at 100 bytes");
     const std::string accented = std::string(99, 'h') + "\xC3\xA9xyz";
@@ -264,6 +272,24 @@ static void ConnectArgsTests() {
     CHECK(r.code.empty() && r.token.empty(), "failed parse clears the request");
 }
 
+static void LuaToolsContractTests() {
+    const std::string dir = "/tmp/cloudredirect-config/";
+    std::ifstream fixture(CR_TEST_FIXTURE_DIR "/luatools-config.json", std::ios::binary);
+    const std::string config((std::istreambuf_iterator<char>(fixture)), {});
+    CHECK(fixture && !config.empty(), "LuaTools config fixture can be read");
+    CHECK(ResolveProviderTokenPath(dir, config, "cabinet") ==
+              R"(C:\Users\Alex\AppData\Roaming\CloudRedirect\tokens_cabinet.json)",
+          "LuaTools absolute Cabinet token path is preserved");
+
+    Cabinet::Credentials creds;
+    std::string err;
+    CHECK(Cabinet::ParseCredentials(
+              R"({"server":"https://cabinet.mc2.onl","token":")" + kToken + R"("})",
+              creds, &err) && creds.server == "https://cabinet.mc2.onl" &&
+              creds.token == kToken && !creds.allowInsecureHttp && !creds.allowInsecureTls,
+          "LuaTools plaintext credential shape is accepted after DPAPI decryption");
+}
+
 int main() {
     ConnectLinkTests();
     PathEncodingTests();
@@ -271,6 +297,7 @@ int main() {
     CredentialTests();
     PairingCodeTests();
     ConnectArgsTests();
+    LuaToolsContractTests();
     if (failures != 0) {
         std::fprintf(stderr, "%d cabinet provider test(s) failed\n", failures);
         return 1;

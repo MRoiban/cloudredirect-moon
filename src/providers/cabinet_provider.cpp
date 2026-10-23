@@ -275,7 +275,7 @@ bool FetchMe(const Credentials& creds, std::string& outUserId,
     outUserId.clear();
     outUserName.clear();
     auto transport = MakeTransport(creds);
-    if (!transport) { outError = "HTTP transport unavailable (libcurl)"; return false; }
+    if (!transport) { outError = "HTTP transport unavailable"; return false; }
 
     HttpUtil::HttpResp r = transport->RequestUrl("GET", creds.server + "/api/me", "",
                                                  BaseHeaders(creds));
@@ -334,7 +334,11 @@ std::string PairingDeviceName(const std::string& hostname) {
         name.resize(cut);
         name = Trim(name);
     }
+#ifdef _WIN32
+    return name.empty() ? std::string("Windows PC") : name;
+#else
     return name.empty() ? std::string("Steam Deck") : name;
+#endif
 }
 
 static bool StartsWith(const std::string& s, const char* prefix) {
@@ -441,7 +445,7 @@ bool RedeemPairingCode(const std::string& server, const std::string& code,
     creds.server = server;
     creds.allowInsecureHttp = allowInsecureHttp;
     auto transport = MakeTransport(creds);
-    if (!transport) { outError = "HTTP transport unavailable (libcurl)"; return false; }
+    if (!transport) { outError = "HTTP transport unavailable"; return false; }
 
     Json::Value body = Json::Object();
     body.objVal["code"] = Json::String(code);

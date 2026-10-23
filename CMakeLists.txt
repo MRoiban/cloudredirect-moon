@@ -256,7 +256,8 @@ if(NOT WIN32)
     target_include_directories(cabinet_provider_tests PRIVATE src/common src/providers
                                                               src/platform/linux)
     target_link_libraries(cabinet_provider_tests PRIVATE cloud_redirect)
-    target_compile_definitions(cabinet_provider_tests PRIVATE _GLIBCXX_USE_CXX11_ABI=0)
+    target_compile_definitions(cabinet_provider_tests PRIVATE _GLIBCXX_USE_CXX11_ABI=0
+        CR_TEST_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/test/fixtures")
     if(LINUX_32BIT)
         target_compile_options(cabinet_provider_tests PRIVATE -m32)
         target_link_options(cabinet_provider_tests PRIVATE -m32)

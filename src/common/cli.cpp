@@ -855,9 +855,9 @@ std::string CmdPublishFullManifest(const std::string& provider, const std::strin
 // Name this device reports to /api/pair (shown in Cabinet's device list).
 static std::string LocalHostname() {
 #ifdef _WIN32
-    char buf[MAX_COMPUTERNAME_LENGTH + 1] = {};
-    DWORD len = sizeof(buf);
-    if (GetComputerNameA(buf, &len)) return std::string(buf, len);
+    wchar_t buf[MAX_COMPUTERNAME_LENGTH + 1] = {};
+    DWORD len = MAX_COMPUTERNAME_LENGTH + 1;
+    if (GetComputerNameW(buf, &len)) return FileUtil::WideToUtf8(buf, len);
     return {};
 #else
     char buf[256] = {};

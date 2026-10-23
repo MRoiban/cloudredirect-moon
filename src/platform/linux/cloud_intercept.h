@@ -14,6 +14,14 @@ void InitLinux();
 bool IsNamespaceApp(uint32_t appId);
 bool HasNamespaceApps();
 
+// Cloud-redirect decision: a managed namespace app the account does not
+// really own. Owned games stay on Valve's Steam Cloud even when a script
+// manages them (SLSsteam slsteam_native_license_v1). steamThread=true only
+// from Steam's own RPC hook threads (BYieldingSend, NotificationDirect,
+// SyncSend2), which may refresh SLSsteam's evidence; everything else passes
+// false and reads its cache. Stats/playtime use StatsEligibility instead.
+bool ShouldRedirect(uint32_t appId, bool steamThread);
+
 // Snapshot of all managed namespace app IDs.
 std::vector<uint32_t> GetNamespaceApps();
 

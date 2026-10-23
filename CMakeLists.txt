@@ -121,6 +121,7 @@ else()
         src/platform/linux/cloud_intercept.cpp
         src/platform/linux/stats_hooks.cpp
         src/platform/linux/stats_eligibility.cpp
+        src/platform/linux/cloud_eligibility.cpp
         src/platform/linux/gamesplayed_hook.cpp
         src/platform/linux/live_playtime.cpp
         src/platform/linux/http_transport_linux.cpp
@@ -274,6 +275,15 @@ if(NOT WIN32)
         add_test(NAME ${target} COMMAND ${target})
     endforeach()
     target_compile_definitions(linux_stats_scope_tests PRIVATE STATS_TEST_WITH_BRIDGE)
+    foreach(target linux_cloud_eligibility_tests linux_cloud_eligibility_no_bridge_tests)
+        add_executable(${target} test/linux_cloud_eligibility_tests.cpp
+            src/platform/linux/cloud_eligibility.cpp src/platform/linux/log.cpp)
+        target_include_directories(${target} PRIVATE src/common src/platform/linux)
+        target_link_libraries(${target} PRIVATE dl pthread)
+        target_link_options(${target} PRIVATE -rdynamic)
+        add_test(NAME ${target} COMMAND ${target})
+    endforeach()
+    target_compile_definitions(linux_cloud_eligibility_tests PRIVATE CLOUD_TEST_WITH_BRIDGE)
     add_executable(linux_stats_archive_tests test/linux_stats_archive_tests.cpp
         src/common/stats_store.cpp src/common/json.cpp src/common/vdf.cpp
         src/common/metadata_sync.cpp src/platform/linux/log.cpp src/platform/linux/file_util.cpp

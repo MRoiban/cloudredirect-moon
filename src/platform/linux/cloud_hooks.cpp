@@ -689,7 +689,7 @@ extern "C" int hook_BYieldingSend(void* pThis, const char* methodName, void* req
     }
     CR_SetCrashContext("BYieldingSend:app", methodName, appId);
 
-    if (!CloudIntercept::IsNamespaceApp(appId)) {
+    if (!CloudIntercept::ShouldRedirect(appId, /*steamThread=*/true)) {
         return origFn(pThis, methodName, request, response, flags);
     }
     CR_SetCrashContext("BYieldingSend:namespace", methodName, appId);
@@ -775,7 +775,7 @@ extern "C" int hook_BYieldingSend(void* pThis, const char* methodName, void* req
 
 // Hook: NotificationDirect (slot 7)
 //
-// Suppress cloud notifications for namespace apps.
+// Suppress cloud notifications for redirected (namespace, not owned) apps.
 
 static uint32_t CheckNotificationNamespaceApp(const char* methodName, void* body) {
     if (!body || !g_serializeToArray) return 0;
@@ -795,7 +795,7 @@ static uint32_t CheckNotificationNamespaceApp(const char* methodName, void* body
     }
 
     uint32_t appId = (uint32_t)appField->varintVal;
-    if (CloudIntercept::IsNamespaceApp(appId)) {
+    if (CloudIntercept::ShouldRedirect(appId, /*steamThread=*/true)) {
         return appId;
     }
     return 0;
@@ -907,7 +907,7 @@ extern "C" int hook_SyncSend2(void* pThis, const char* methodName, void* buf, un
     }
     CR_SetCrashContext("SyncSend2:app", methodName, appId);
 
-    if (!CloudIntercept::IsNamespaceApp(appId)) {
+    if (!CloudIntercept::ShouldRedirect(appId, /*steamThread=*/true)) {
         return origFn(pThis, methodName, buf, bufLen, response, flags);
     }
     CR_SetCrashContext("SyncSend2:namespace", methodName, appId);
@@ -950,7 +950,7 @@ extern "C" int hook_SyncSend2(void* pThis, const char* methodName, void* buf, un
 
 // Hook: IsCloudEnabledForApp (CUserRemoteStorage vtable slot 24)
 // 32-bit cdecl: bool(void* this, unsigned int appId)
-// Returns true for namespace apps so cloud toggle stays enabled.
+// Returns true for redirected namespace apps so cloud toggle stays enabled.
 
 using IsCloudEnabledForApp_t = bool(*)(void* pThis, unsigned int appId);
 static std::atomic<IsCloudEnabledForApp_t> g_origIsCloudEnabledForApp{nullptr};
@@ -967,7 +967,9 @@ extern "C" bool hook_IsCloudEnabledForApp(void* pThis, unsigned int appId)
         return fn ? fn(pThis, appId) : true;
     }
     CrashContextScope crashContext("IsCloudEnabledForApp:entry", "IsCloudEnabledForApp", appId);
-    if (CloudIntercept::IsNamespaceApp(appId)) {
+    // Not one of the RPC hook threads, so cached license evidence only. An
+    // owned game reports Steam's own cloud toggle.
+    if (CloudIntercept::ShouldRedirect(appId, /*steamThread=*/false)) {
         LOG("[Hook] IsCloudEnabledForApp(%u) -> true (namespace app)", appId);
         return true;
     }

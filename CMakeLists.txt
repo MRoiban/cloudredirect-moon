@@ -96,6 +96,7 @@ set(PROVIDER_SOURCES
     src/providers/local_disk_provider.cpp
     src/providers/s3_provider.cpp
     src/providers/r2_provider.cpp
+    src/providers/cabinet_provider.cpp
 )
 
 if(WIN32)
@@ -120,6 +121,7 @@ else()
         src/platform/linux/cloud_intercept.cpp
         src/platform/linux/stats_hooks.cpp
         src/platform/linux/stats_eligibility.cpp
+        src/platform/linux/cloud_eligibility.cpp
         src/platform/linux/gamesplayed_hook.cpp
         src/platform/linux/live_playtime.cpp
         src/platform/linux/http_transport_linux.cpp
@@ -250,6 +252,16 @@ if(NOT WIN32)
         target_link_options(provider_config_tests PRIVATE -m32)
     endif()
     add_test(NAME provider_config_tests COMMAND provider_config_tests)
+    add_executable(cabinet_provider_tests test/cabinet_provider_tests.cpp)
+    target_include_directories(cabinet_provider_tests PRIVATE src/common src/providers
+                                                              src/platform/linux)
+    target_link_libraries(cabinet_provider_tests PRIVATE cloud_redirect)
+    target_compile_definitions(cabinet_provider_tests PRIVATE _GLIBCXX_USE_CXX11_ABI=0)
+    if(LINUX_32BIT)
+        target_compile_options(cabinet_provider_tests PRIVATE -m32)
+        target_link_options(cabinet_provider_tests PRIVATE -m32)
+    endif()
+    add_test(NAME cabinet_provider_tests COMMAND cabinet_provider_tests)
 endif()
 
 if(NOT WIN32)
@@ -263,6 +275,15 @@ if(NOT WIN32)
         add_test(NAME ${target} COMMAND ${target})
     endforeach()
     target_compile_definitions(linux_stats_scope_tests PRIVATE STATS_TEST_WITH_BRIDGE)
+    foreach(target linux_cloud_eligibility_tests linux_cloud_eligibility_no_bridge_tests)
+        add_executable(${target} test/linux_cloud_eligibility_tests.cpp
+            src/platform/linux/cloud_eligibility.cpp src/platform/linux/log.cpp)
+        target_include_directories(${target} PRIVATE src/common src/platform/linux)
+        target_link_libraries(${target} PRIVATE dl pthread)
+        target_link_options(${target} PRIVATE -rdynamic)
+        add_test(NAME ${target} COMMAND ${target})
+    endforeach()
+    target_compile_definitions(linux_cloud_eligibility_tests PRIVATE CLOUD_TEST_WITH_BRIDGE)
     add_executable(linux_stats_archive_tests test/linux_stats_archive_tests.cpp
         src/common/stats_store.cpp src/common/json.cpp src/common/vdf.cpp
         src/common/metadata_sync.cpp src/platform/linux/log.cpp src/platform/linux/file_util.cpp
@@ -411,6 +432,7 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tests/autocloud_native_tests.cpp)
         src/providers/local_disk_provider.cpp
         src/providers/s3_provider.cpp
         src/providers/r2_provider.cpp
+        src/providers/cabinet_provider.cpp
     )
     target_include_directories(cloud_storage_staging_tests PRIVATE src/common src/providers src/testutil)
     if(WIN32)

@@ -7,7 +7,7 @@
 //   Linux:   cloud_redirect_cli <command> [args...]
 //
 // Commands:
-// Subcommands: auth-status, authenticate, list-remote-apps, delete-remote-app, list-blobs, delete-blobs
+// Subcommands: auth-status, cabinet-connect, authenticate, list-remote-apps, delete-remote-app, list-blobs, delete-blobs
 //
 // All output is JSON to stdout. Exit code 0 = success, 1 = error.
 
@@ -39,6 +39,10 @@ std::string CmdSyncRemoteApp(const std::string& provider, const std::string& acc
 std::string CmdSyncAllRemoteApps(const std::string& provider, const std::string& accountId,
                                  const std::string& cloudRoot);
 std::string CmdPruneLocalLegacyMetadata(const std::string& cloudRoot);
+// Verify a Cabinet connect link (or server + token) against GET /api/me, then
+// write the credential document and select "cabinet" in config.json.
+std::string CmdCabinetConnect(const std::string& linkOrServer, const std::string& token,
+                              bool allowInsecureHttp);
 std::string CmdPublishFullManifest(const std::string& provider, const std::string& accountId, const std::string& appId,
                                    const std::string& cloudRoot);
 

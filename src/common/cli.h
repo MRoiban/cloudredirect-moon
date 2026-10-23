@@ -14,6 +14,8 @@
 #include <string>
 #include <vector>
 
+namespace Cabinet { struct ConnectRequest; }
+
 namespace CloudRedirectCli {
 
 // Check if arguments indicate CLI mode (first arg is "--cli")
@@ -39,10 +41,10 @@ std::string CmdSyncRemoteApp(const std::string& provider, const std::string& acc
 std::string CmdSyncAllRemoteApps(const std::string& provider, const std::string& accountId,
                                  const std::string& cloudRoot);
 std::string CmdPruneLocalLegacyMetadata(const std::string& cloudRoot);
-// Verify a Cabinet connect link (or server + token) against GET /api/me, then
-// write the credential document and select "cabinet" in config.json.
-std::string CmdCabinetConnect(const std::string& linkOrServer, const std::string& token,
-                              bool allowInsecureHttp);
+// Connect to Cabinet: verify a connect link (or server + token) against
+// GET /api/me, or redeem a pairing code via POST /api/pair; then write the
+// credential document and select "cabinet" in config.json.
+std::string CmdCabinetConnect(const Cabinet::ConnectRequest& request);
 std::string CmdPublishFullManifest(const std::string& provider, const std::string& accountId, const std::string& appId,
                                    const std::string& cloudRoot);
 

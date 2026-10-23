@@ -6,6 +6,7 @@
 #include "onedrive_provider.h"
 #include "s3_provider.h"
 #include "r2_provider.h"
+#include "cabinet_provider.h"
 #include "cloud_metadata_paths.h"
 #include "cloud_staging.h"
 #include "file_util.h"
@@ -3187,6 +3188,11 @@ std::unique_ptr<ICloudProvider> CreateCloudProvider(const std::string& name) {
     }
     if (lower == "s3") {
         return std::make_unique<S3Provider>();
+    }
+    // Cabinet's bearer token is long-lived (revoked from /admin, never
+    // refreshed), so it also needs no auth-failure callback.
+    if (lower == "cabinet") {
+        return std::make_unique<CabinetProvider>();
     }
     // Wire the auth-failure callback at construction so CloudProviderBase
     // doesn't reverse-depend on CloudStorage.

@@ -96,6 +96,7 @@ set(PROVIDER_SOURCES
     src/providers/local_disk_provider.cpp
     src/providers/s3_provider.cpp
     src/providers/r2_provider.cpp
+    src/providers/cabinet_provider.cpp
 )
 
 if(WIN32)
@@ -250,6 +251,16 @@ if(NOT WIN32)
         target_link_options(provider_config_tests PRIVATE -m32)
     endif()
     add_test(NAME provider_config_tests COMMAND provider_config_tests)
+    add_executable(cabinet_provider_tests test/cabinet_provider_tests.cpp)
+    target_include_directories(cabinet_provider_tests PRIVATE src/common src/providers
+                                                              src/platform/linux)
+    target_link_libraries(cabinet_provider_tests PRIVATE cloud_redirect)
+    target_compile_definitions(cabinet_provider_tests PRIVATE _GLIBCXX_USE_CXX11_ABI=0)
+    if(LINUX_32BIT)
+        target_compile_options(cabinet_provider_tests PRIVATE -m32)
+        target_link_options(cabinet_provider_tests PRIVATE -m32)
+    endif()
+    add_test(NAME cabinet_provider_tests COMMAND cabinet_provider_tests)
 endif()
 
 if(NOT WIN32)
@@ -411,6 +422,7 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tests/autocloud_native_tests.cpp)
         src/providers/local_disk_provider.cpp
         src/providers/s3_provider.cpp
         src/providers/r2_provider.cpp
+        src/providers/cabinet_provider.cpp
     )
     target_include_directories(cloud_storage_staging_tests PRIVATE src/common src/providers src/testutil)
     if(WIN32)

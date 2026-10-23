@@ -330,7 +330,10 @@ void Backend::loadConfig()
         m_notificationsEnabled ? "true" : "false");
 
     m_providerAuthenticated = false;
-    if (m_providerName == "gdrive" || m_providerName == "onedrive") {
+    // Cabinet's credential file is written by `cloud_redirect_cli cabinet-connect`
+    // at the same tokens_<provider>.json convention path.
+    if (m_providerName == "gdrive" || m_providerName == "onedrive" ||
+        m_providerName == "cabinet") {
         QString tokenPath = defaultTokenPath(m_providerName);
         if (QFile::exists(tokenPath)) {
             m_providerAuthenticated = true;
@@ -2097,6 +2100,7 @@ QString Backend::providerLabel(const QString &provider) const
     if (provider == "onedrive") return "OneDrive";
     if (provider == "r2")       return "Cloudflare R2";
     if (provider == "s3")       return "S3 Compatible";
+    if (provider == "cabinet")  return "Cabinet";
     if (provider == "folder")   return "Custom Folder";
     if (provider == "local")    return "Local Storage";
     return provider;

@@ -165,11 +165,112 @@ static void CredentialTests() {
           "serialized credentials round-trip");
 }
 
+static void PairingCodeTests() {
+    std::string code;
+    CHECK(Cabinet::NormalizePairingCode("ABCD-EFGH-JKMN", code) && code == "ABCDEFGHJKMN",
+          "dashed display form normalizes to 12 characters");
+    CHECK(Cabinet::NormalizePairingCode("abcdefghjkmn", code) && code == "ABCDEFGHJKMN",
+          "lowercase is accepted");
+    CHECK(Cabinet::NormalizePairingCode(" 7pq9 - rstv -wxyz\n", code) && code == "7PQ9RSTVWXYZ",
+          "spaces, dashes and a pasted newline are ignored");
+    CHECK(Cabinet::NormalizePairingCode("OoIi-Ll00-1234", code) && code == "001111001234",
+          "O reads as 0, I and L read as 1 (any case)");
+    CHECK(Cabinet::NormalizePairingCode("0123456789AB", code) && code == "0123456789AB",
+          "digits are accepted");
+
+    CHECK(!Cabinet::NormalizePairingCode("ABCD-EFGH-JKM", code), "11 characters are rejected");
+    CHECK(!Cabinet::NormalizePairingCode("ABCD-EFGH-JKMNP", code), "13 characters are rejected");
+    CHECK(!Cabinet::NormalizePairingCode("ABCD-EFGH-JKMU", code), "U is not Crockford base32");
+    CHECK(!Cabinet::NormalizePairingCode("ABCD.EFGH.JKMN", code), "punctuation other than - is rejected");
+    CHECK(!Cabinet::NormalizePairingCode("ABCD_EFGH_JKMN", code), "underscore is rejected");
+    CHECK(!Cabinet::NormalizePairingCode("ABCD-EFGH-JKM\xC3\x89", code), "non-ASCII is rejected");
+    CHECK(!Cabinet::NormalizePairingCode("", code), "empty input is rejected");
+    CHECK(!Cabinet::NormalizePairingCode("------------", code), "separators alone are rejected");
+    CHECK(code.empty(), "failed normalization clears the output");
+
+    CHECK(Cabinet::PairingDeviceName("steamdeck\n") == "steamdeck", "hostname is trimmed");
+    CHECK(Cabinet::PairingDeviceName("") == "Steam Deck", "empty hostname falls back to Steam Deck");
+    CHECK(Cabinet::PairingDeviceName(" \t") == "Steam Deck", "blank hostname falls back to Steam Deck");
+    CHECK(Cabinet::PairingDeviceName(std::string(150, 'h')) == std::string(100, 'h'),
+          "device name is capped at 100 bytes");
+    const std::string accented = std::string(99, 'h') + "\xC3\xA9xyz";
+    CHECK(Cabinet::PairingDeviceName(accented) == std::string(99, 'h'),
+          "device name is not cut inside a UTF-8 character");
+
+    CHECK(Cabinet::PairingErrorMessage(401, "https://c.example") == "That code is wrong or has expired.",
+          "401 maps to the wrong/expired message");
+    CHECK(Cabinet::PairingErrorMessage(429, "https://c.example") == "Too many attempts, wait a minute.",
+          "429 maps to the rate-limit message");
+    CHECK(Cabinet::PairingErrorMessage(0, "https://c.example").find("Could not reach https://c.example") == 0,
+          "transport failure names the server");
+}
+
+static void ConnectArgsTests() {
+    using Kind = Cabinet::ConnectRequest::Kind;
+    Cabinet::ConnectRequest r;
+    std::string err;
+
+    CHECK(Cabinet::ParseConnectArgs({"abcd-efgh-jkmn"}, r, err) && r.kind == Kind::PairingCode &&
+              r.code == "ABCDEFGHJKMN" && r.server == Cabinet::kDefaultPairingServer &&
+              r.token.empty(),
+          "a bare code uses the default server");
+    CHECK(Cabinet::ParseConnectArgs({"ABCD", "EFGH", "JKMN"}, r, err) &&
+              r.kind == Kind::PairingCode && r.code == "ABCDEFGHJKMN",
+          "an unquoted code split by spaces is joined");
+    CHECK(Cabinet::ParseConnectArgs({"ABCDEFGHJKMN", "--server", "https://Cab.Example:443/"}, r, err) &&
+              r.kind == Kind::PairingCode && r.server == "https://cab.example",
+          "--server overrides and is normalized");
+    CHECK(Cabinet::ParseConnectArgs({"--server=https://cab.example", "ABCDEFGHJKMN"}, r, err) &&
+              r.server == "https://cab.example",
+          "--server=<origin> form works before the code");
+    CHECK(!Cabinet::ParseConnectArgs({"ABCDEFGHJKMN", "--server", "http://10.0.0.2:8080"}, r, err) &&
+              err.find("--allow-insecure-http") != std::string::npos,
+          "plaintext --server needs --allow-insecure-http");
+    CHECK(Cabinet::ParseConnectArgs({"ABCDEFGHJKMN", "--server", "http://10.0.0.2:8080",
+                                     "--allow-insecure-http"}, r, err) &&
+              r.server == "http://10.0.0.2:8080" && r.allowInsecureHttp,
+          "--allow-insecure-http permits a plaintext --server");
+    CHECK(!Cabinet::ParseConnectArgs({"ABCDEFGHJKMN", "--server"}, r, err), "--server without a value fails");
+    CHECK(!Cabinet::ParseConnectArgs({"ABCDEFGHJKMN", "--server", "cab.example"}, r, err),
+          "--server without a scheme fails");
+    CHECK(!Cabinet::ParseConnectArgs({"ABCD-EFGH-JKMU"}, r, err) &&
+              err.find("pairing code") != std::string::npos,
+          "an invalid code reports a pairing-code error");
+    CHECK(!Cabinet::ParseConnectArgs({"ABCD-EFGH-JKM"}, r, err), "an 11-character code fails");
+
+    CHECK(Cabinet::ParseConnectArgs({"https://cabinet.example/connect#" + kToken}, r, err) &&
+              r.kind == Kind::Link && r.server == "https://cabinet.example" && r.token == kToken,
+          "a connect link is still accepted");
+    CHECK(!Cabinet::ParseConnectArgs({"https://cabinet.example/connect#cab_short"}, r, err) &&
+              err.find("connect link") != std::string::npos && err.find("cab_short") == std::string::npos,
+          "a bad link reports a link error without echoing the token");
+    CHECK(Cabinet::ParseConnectArgs({"https://cabinet.example", kToken}, r, err) &&
+              r.kind == Kind::ServerToken && r.server == "https://cabinet.example" && r.token == kToken,
+          "<server> <token> is still accepted");
+    CHECK(!Cabinet::ParseConnectArgs({"https://cabinet.example", "cab_short"}, r, err) &&
+              err.find("Malformed Cabinet token") != std::string::npos,
+          "<server> <bad token> reports a token error");
+    CHECK(!Cabinet::ParseConnectArgs({"http://10.0.0.2", kToken}, r, err),
+          "plaintext <server> needs --allow-insecure-http");
+    CHECK(Cabinet::ParseConnectArgs({"--allow-insecure-http", "http://10.0.0.2", kToken}, r, err) &&
+              r.allowInsecureHttp,
+          "--allow-insecure-http still works for <server> <token>");
+    CHECK(!Cabinet::ParseConnectArgs({"https://cabinet.example/connect#" + kToken, "--server",
+                                      "https://other.example"}, r, err),
+          "--server is refused with a connect link");
+
+    CHECK(!Cabinet::ParseConnectArgs({}, r, err), "no arguments fails");
+    CHECK(!Cabinet::ParseConnectArgs({"ABCDEFGHJKMN", "--bogus"}, r, err), "unknown option fails");
+    CHECK(r.code.empty() && r.token.empty(), "failed parse clears the request");
+}
+
 int main() {
     ConnectLinkTests();
     PathEncodingTests();
     ListPageTests();
     CredentialTests();
+    PairingCodeTests();
+    ConnectArgsTests();
     if (failures != 0) {
         std::fprintf(stderr, "%d cabinet provider test(s) failed\n", failures);
         return 1;

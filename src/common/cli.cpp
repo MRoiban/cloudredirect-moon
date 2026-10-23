@@ -852,26 +852,24 @@ std::string CmdPublishFullManifest(const std::string& provider, const std::strin
     });
 }
 
-std::string CmdCabinetConnect(const std::string& linkOrServer, const std::string& token,
-                              bool allowInsecureHttp) {
-    Cabinet::Credentials creds;
-    if (token.empty()) {
-        if (!Cabinet::ParseConnectLink(linkOrServer, creds.server, creds.token))
-            return JsonError("Not a Cabinet connect link (expected https://<server>/connect#cab_...)");
-    } else {
-        if (!Cabinet::NormalizeOrigin(linkOrServer, creds.server))
-            return JsonError("Server must be an http(s) origin such as https://cabinet.example");
-        if (!Cabinet::IsValidToken(token))
-            return JsonError("Malformed Cabinet token (expected cab_ + 43 base64url characters)");
-        creds.token = token;
-    }
-    creds.allowInsecureHttp = allowInsecureHttp;
-    if (creds.server.compare(0, 7, "http://") == 0 && !allowInsecureHttp)
-        return JsonError("Refusing plaintext http:// server; pass --allow-insecure-http to override");
+// Name this device reports to /api/pair (shown in Cabinet's device list).
+static std::string LocalHostname() {
+#ifdef _WIN32
+    char buf[MAX_COMPUTERNAME_LENGTH + 1] = {};
+    DWORD len = sizeof(buf);
+    if (GetComputerNameA(buf, &len)) return std::string(buf, len);
+    return {};
+#else
+    char buf[256] = {};
+    if (gethostname(buf, sizeof(buf) - 1) == 0) return buf;
+    return {};
+#endif
+}
 
-    std::string userId, userName, err;
-    if (!Cabinet::FetchMe(creds, userId, userName, err))
-        return JsonError("Cabinet verification failed: " + err);
+std::string CmdCabinetConnect(const Cabinet::ConnectRequest& request) {
+    Cabinet::Credentials creds;
+    creds.server = request.server;
+    creds.allowInsecureHttp = request.allowInsecureHttp;
 
     const std::string configDir = GetConfigDir();
     if (configDir.empty()) return JsonError("Cannot determine config directory");
@@ -895,7 +893,24 @@ std::string CmdCabinetConnect(const std::string& linkOrServer, const std::string
     const std::string credPath = GetTokenPath("cabinet");
     if (credPath.empty()) return JsonError("Cannot determine credential path");
     auto store = CreateTokenStore();
-    if (!store || !store->Write(credPath, Cabinet::SerializeCredentials(creds)))
+    if (!store) return JsonError("Credential store unavailable");
+
+    // Network last before writing: a redeemed pairing code is spent, so all
+    // local preconditions are checked first.
+    std::string userId, userName, err;
+    if (request.kind == Cabinet::ConnectRequest::Kind::PairingCode) {
+        if (!Cabinet::RedeemPairingCode(creds.server, request.code,
+                                        Cabinet::PairingDeviceName(LocalHostname()),
+                                        creds.allowInsecureHttp, creds.token,
+                                        userId, userName, err))
+            return JsonError(err);
+    } else {
+        creds.token = request.token;
+        if (!Cabinet::FetchMe(creds, userId, userName, err))
+            return JsonError("Cabinet verification failed: " + err);
+    }
+
+    if (!store->Write(credPath, Cabinet::SerializeCredentials(creds)))
         return JsonError("Failed to write credentials to " + credPath);
 
     // Pin the credential path as well as the provider: a leftover top-level
@@ -1391,7 +1406,10 @@ static void PrintUsage() {
     fprintf(stderr, "  gc-blobs <provider> <account_id> <app_id> <cloud_root>  Delete unreferenced SHA blobs from cloud\n");
     fprintf(stderr, "  scan-all <provider>                                       List all apps across all accounts (single-pass)\n");
     fprintf(stderr, "  migrate <src_provider> <dst_provider>                     Copy all cloud data from one provider to another\n");
-    fprintf(stderr, "  cabinet-connect <connect_link> | <server> <token> [--allow-insecure-http]  Verify and select a Cabinet server\n");
+    fprintf(stderr, "  cabinet-connect <pairing_code> [--server <origin>]       Redeem a Cabinet pairing code (XXXX-XXXX-XXXX)\n");
+    fprintf(stderr, "                                                            and select Cabinet; server defaults to %s\n", Cabinet::kDefaultPairingServer);
+    fprintf(stderr, "  cabinet-connect <connect_link> | <server> <token>        Verify a connect link / token and select Cabinet\n");
+    fprintf(stderr, "                  [--allow-insecure-http]                   (any form) permit a plaintext http:// server\n");
     fprintf(stderr, "\nProviders: cabinet, folder, gdrive, onedrive, r2, s3\n");
 }
 
@@ -1515,17 +1533,15 @@ int RunCli(int argc, char** argv) {
         result = CmdScanAll(argv[3]);
     }
     else if (strcmp(command, "cabinet-connect") == 0) {
-        std::vector<std::string> args;
-        bool insecure = false;
-        for (int i = 3; i < argc; i++) {
-            if (strcmp(argv[i], "--allow-insecure-http") == 0) insecure = true;
-            else args.push_back(argv[i]);
-        }
-        if (args.empty() || args.size() > 2) {
-            fprintf(stderr, "Error: cabinet-connect requires <connect_link> or <server> <token>\n");
+        std::vector<std::string> args(argv + 3, argv + argc);
+        Cabinet::ConnectRequest request;
+        std::string err;
+        if (!Cabinet::ParseConnectArgs(args, request, err)) {
+            fprintf(stderr, "Error: %s\n", err.c_str());
+            fprintf(stderr, "Usage: cabinet-connect <pairing_code> [--server <origin>] | <connect_link> | <server> <token> [--allow-insecure-http]\n");
             return 1;
         }
-        result = CmdCabinetConnect(args[0], args.size() == 2 ? args[1] : std::string(), insecure);
+        result = CmdCabinetConnect(request);
     }
     else if (strcmp(command, "migrate") == 0) {
         if (argc < 5) {

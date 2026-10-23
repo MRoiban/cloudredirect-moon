@@ -55,6 +55,50 @@ std::string SerializeCredentials(const Credentials& creds);
 bool FetchMe(const Credentials& creds, std::string& outUserId,
              std::string& outUserName, std::string& outError);
 
+// ---- Pairing codes (cloud-api.md, "Pairing codes") ----
+
+// Server a pairing code is redeemed against unless --server is given.
+// Only used for codes; connect links always carry their own server.
+inline constexpr const char* kDefaultPairingServer = "https://cabinet.mc2.onl";
+
+// Case-insensitive; spaces and '-' are ignored; O reads as 0, I/L as 1. The
+// result must be exactly 12 Crockford base32 characters (0-9 A-H J K M N P-T
+// V-Z). outCode receives the 12 uppercase characters without separators.
+bool NormalizePairingCode(const std::string& input, std::string& outCode);
+
+// Hostname -> deviceName for /api/pair: trimmed, control characters dropped,
+// at most 100 bytes (cut on a UTF-8 boundary); "Steam Deck" when empty.
+std::string PairingDeviceName(const std::string& hostname);
+
+// What `cabinet-connect` was asked to do, parsed from its arguments.
+struct ConnectRequest {
+    enum class Kind { Link, ServerToken, PairingCode };
+    Kind kind = Kind::Link;
+    std::string server;  // normalized origin (all kinds)
+    std::string token;   // Link / ServerToken
+    std::string code;    // PairingCode: normalized 12 characters
+    bool allowInsecureHttp = false;
+};
+
+// Arguments after "cabinet-connect":
+//   <connect_link>
+//   <server> <token>
+//   <pairing_code> [--server <origin>]   (the code may be split across args)
+// plus --allow-insecure-http anywhere. On failure outError is a user-facing
+// message that never contains a token.
+bool ParseConnectArgs(const std::vector<std::string>& args, ConnectRequest& out,
+                      std::string& outError);
+
+// POST /api/pair. On success fills outToken and the user; on failure outError
+// is a user-facing message (never contains the code's token).
+bool RedeemPairingCode(const std::string& server, const std::string& code,
+                       const std::string& deviceName, bool allowInsecureHttp,
+                       std::string& outToken, std::string& outUserId,
+                       std::string& outUserName, std::string& outError);
+
+// Human-readable message for a /api/pair HTTP status (0 = transport failure).
+std::string PairingErrorMessage(int status, const std::string& server);
+
 } // namespace Cabinet
 
 class CabinetProvider : public ICloudProvider {

@@ -7,6 +7,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <random>
 #include <thread>
 
@@ -261,6 +262,14 @@ static std::vector<std::string> BaseHeaders(const Credentials& creds) {
              "Origin: " + creds.server };
 }
 
+// { "id": string|number, "name": string } as returned by /api/me and /api/pair.
+static void ReadUser(const Json::Value& user, std::string& outId, std::string& outName) {
+    if (user["id"].type == Json::Type::String) outId = user["id"].str();
+    else if (user["id"].type == Json::Type::Number)
+        outId = std::to_string(user["id"].integer());
+    if (user["name"].type == Json::Type::String) outName = user["name"].str();
+}
+
 bool FetchMe(const Credentials& creds, std::string& outUserId,
              std::string& outUserName, std::string& outError) {
     outUserId.clear();
@@ -283,10 +292,183 @@ bool FetchMe(const Credentials& creds, std::string& outUserId,
         outError = "/api/me returned an unexpected body";
         return false;
     }
-    if (user["id"].type == Json::Type::String) outUserId = user["id"].str();
-    else if (user["id"].type == Json::Type::Number)
-        outUserId = std::to_string(user["id"].integer());
-    if (user["name"].type == Json::Type::String) outUserName = user["name"].str();
+    ReadUser(user, outUserId, outUserName);
+    return true;
+}
+
+// ---- Pairing codes ----
+
+static constexpr size_t kPairingCodeLen = 12;
+static constexpr size_t kMaxDeviceNameBytes = 100;
+static constexpr const char* kCrockfordAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+bool NormalizePairingCode(const std::string& input, std::string& outCode) {
+    outCode.clear();
+    std::string code;
+    for (unsigned char c : input) {
+        // Spaces and dashes are separators. Other whitespace only arrives from
+        // a paste (trailing newline, tab) and is treated the same way.
+        if (c == '-' || std::isspace(c)) continue;
+        if (c >= 0x80) return false;
+        c = (unsigned char)std::toupper(c);
+        if (c == 'O') c = '0';
+        else if (c == 'I' || c == 'L') c = '1';
+        if (std::strchr(kCrockfordAlphabet, c) == nullptr || c == '\0') return false;
+        code += (char)c;
+        if (code.size() > kPairingCodeLen) return false;
+    }
+    if (code.size() != kPairingCodeLen) return false;
+    outCode = std::move(code);
+    return true;
+}
+
+std::string PairingDeviceName(const std::string& hostname) {
+    std::string name;
+    for (unsigned char c : hostname)
+        if (c >= 0x20 && c != 0x7F) name += (char)c;
+    name = Trim(name);
+    if (name.size() > kMaxDeviceNameBytes) {
+        size_t cut = kMaxDeviceNameBytes;
+        // Back up over UTF-8 continuation bytes so a character isn't split.
+        while (cut > 0 && ((unsigned char)name[cut] & 0xC0) == 0x80) --cut;
+        name.resize(cut);
+        name = Trim(name);
+    }
+    return name.empty() ? std::string("Steam Deck") : name;
+}
+
+static bool StartsWith(const std::string& s, const char* prefix) {
+    return s.compare(0, std::strlen(prefix), prefix) == 0;
+}
+
+bool ParseConnectArgs(const std::vector<std::string>& args, ConnectRequest& out,
+                      std::string& outError) {
+    out = ConnectRequest{};
+    outError.clear();
+    auto fail = [&](const std::string& why) {
+        out = ConnectRequest{};
+        outError = why;
+        return false;
+    };
+
+    std::vector<std::string> positional;
+    bool allowInsecureHttp = false;
+    bool haveServerFlag = false;
+    std::string serverFlag;
+    for (size_t i = 0; i < args.size(); ++i) {
+        const std::string& a = args[i];
+        if (a == "--allow-insecure-http") {
+            allowInsecureHttp = true;
+        } else if (a == "--server") {
+            if (i + 1 >= args.size() || StartsWith(args[i + 1], "--"))
+                return fail("--server needs an origin such as https://cabinet.example");
+            haveServerFlag = true;
+            serverFlag = args[++i];
+        } else if (StartsWith(a, "--server=")) {
+            haveServerFlag = true;
+            serverFlag = a.substr(9);
+        } else if (StartsWith(a, "--")) {
+            return fail("Unknown option " + a);
+        } else {
+            positional.push_back(a);
+        }
+    }
+    if (positional.empty())
+        return fail("cabinet-connect needs a pairing code, a connect link, or <server> <token>");
+
+    const bool firstIsUrl = positional[0].find("://") != std::string::npos;
+    ConnectRequest req;
+    req.allowInsecureHttp = allowInsecureHttp;
+
+    if (positional.size() == 1 && firstIsUrl) {
+        if (!ParseConnectLink(positional[0], req.server, req.token))
+            return fail("Not a Cabinet connect link (expected https://<server>/connect#cab_...)");
+        req.kind = ConnectRequest::Kind::Link;
+    } else if (positional.size() == 2 && (firstIsUrl || StartsWith(positional[1], "cab_"))) {
+        if (!NormalizeOrigin(positional[0], req.server))
+            return fail("Server must be an http(s) origin such as https://cabinet.example");
+        if (!IsValidToken(positional[1]))
+            return fail("Malformed Cabinet token (expected cab_ + 43 base64url characters)");
+        req.token = positional[1];
+        req.kind = ConnectRequest::Kind::ServerToken;
+    } else if (firstIsUrl) {
+        return fail("cabinet-connect takes <connect_link> or <server> <token>");
+    } else {
+        // A pairing code, possibly typed as "ABCD EFGH JKMN" without quotes.
+        std::string joined;
+        for (const auto& p : positional) joined += p;
+        if (!NormalizePairingCode(joined, req.code))
+            return fail("Not a pairing code: expected 12 characters like ABCD-EFGH-JKMN");
+        const std::string server = haveServerFlag ? serverFlag : kDefaultPairingServer;
+        if (!NormalizeOrigin(server, req.server))
+            return fail("--server must be an http(s) origin such as https://cabinet.example");
+        req.kind = ConnectRequest::Kind::PairingCode;
+    }
+
+    if (haveServerFlag && req.kind != ConnectRequest::Kind::PairingCode)
+        return fail("--server only applies to pairing codes; a connect link names its server");
+    if (StartsWith(req.server, "http://") && !allowInsecureHttp)
+        return fail("Refusing plaintext http:// server; pass --allow-insecure-http to override");
+
+    out = std::move(req);
+    return true;
+}
+
+std::string PairingErrorMessage(int status, const std::string& server) {
+    switch (status) {
+    case 0:   return "Could not reach " + server + ". Check the network connection and try again.";
+    case 400: return "The server did not accept that code's format. Check the code and try again.";
+    case 401: return "That code is wrong or has expired.";
+    case 403: return server + " refused the request (HTTP 403). Check --server.";
+    case 404: return server + " does not support pairing codes (HTTP 404). Check --server or use a connect link.";
+    case 429: return "Too many attempts, wait a minute.";
+    default: break;
+    }
+    if (status >= 500)
+        return server + " had a problem (HTTP " + std::to_string(status) + "). Try again in a moment.";
+    return "Unexpected HTTP " + std::to_string(status) + " from " + server + "/api/pair.";
+}
+
+bool RedeemPairingCode(const std::string& server, const std::string& code,
+                       const std::string& deviceName, bool allowInsecureHttp,
+                       std::string& outToken, std::string& outUserId,
+                       std::string& outUserName, std::string& outError) {
+    outToken.clear();
+    outUserId.clear();
+    outUserName.clear();
+
+    Credentials creds;
+    creds.server = server;
+    creds.allowInsecureHttp = allowInsecureHttp;
+    auto transport = MakeTransport(creds);
+    if (!transport) { outError = "HTTP transport unavailable (libcurl)"; return false; }
+
+    Json::Value body = Json::Object();
+    body.objVal["code"] = Json::String(code);
+    body.objVal["deviceName"] = Json::String(deviceName);
+
+    // Unauthenticated write: the Origin header is what Bedrock checks. The
+    // transport supplies User-Agent: CloudRedirect/1.0. No retries: a code
+    // works once, and failed attempts count toward the server-wide limit.
+    HttpUtil::HttpResp r = transport->RequestUrl(
+        "POST", server + "/api/pair", Json::Stringify(body),
+        { "Content-Type: application/json", "Accept: application/json",
+          "Origin: " + server });
+    transport->Shutdown();
+
+    if (r.status != 200) {
+        outError = PairingErrorMessage(r.status, server);
+        return false;
+    }
+    const Json::Value root = Json::Parse(r.body);
+    const Json::Value& user = root["user"];
+    if (root.type != Json::Type::Object || root["token"].type != Json::Type::String ||
+        !IsValidToken(root["token"].str()) || user.type != Json::Type::Object) {
+        outError = server + "/api/pair returned an unexpected response.";
+        return false;
+    }
+    outToken = root["token"].str();
+    ReadUser(user, outUserId, outUserName);
     return true;
 }
 

@@ -3216,12 +3216,14 @@ std::string ResolveProviderTokenPath(const std::string& configDir,
                                      const std::string& provider) {
     auto resolvePath = [&configDir](const std::string& path) {
         if (path.empty()) return path;
+        // Preserve Windows absolute paths in imported configs on Linux too.
+        const bool windowsAbsolute = (path.size() >= 3 && path[1] == ':' &&
+                                      (path[2] == '\\' || path[2] == '/')) ||
+                                     (path.size() >= 2 && path[0] == '\\' && path[1] == '\\');
 #ifdef _WIN32
-        const bool absolute = (path.size() >= 3 && path[1] == ':' &&
-                               (path[2] == '\\' || path[2] == '/')) ||
-                              (path.size() >= 2 && path[0] == '\\' && path[1] == '\\');
+        const bool absolute = windowsAbsolute;
 #else
-        const bool absolute = path[0] == '/';
+        const bool absolute = windowsAbsolute || path[0] == '/';
 #endif
         if (absolute || configDir.empty()) return path;
         const char last = configDir.back();

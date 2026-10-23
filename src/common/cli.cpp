@@ -30,7 +30,7 @@
 
 #ifdef _WIN32
 #include <Windows.h>
-#include <Shlobj.h>
+#include <ShlObj.h>
 #else
 #include <unistd.h>
 #include <pwd.h>
@@ -855,9 +855,9 @@ std::string CmdPublishFullManifest(const std::string& provider, const std::strin
 // Name this device reports to /api/pair (shown in Cabinet's device list).
 static std::string LocalHostname() {
 #ifdef _WIN32
-    char buf[MAX_COMPUTERNAME_LENGTH + 1] = {};
-    DWORD len = sizeof(buf);
-    if (GetComputerNameA(buf, &len)) return std::string(buf, len);
+    wchar_t buf[MAX_COMPUTERNAME_LENGTH + 1] = {};
+    DWORD len = MAX_COMPUTERNAME_LENGTH + 1;
+    if (GetComputerNameW(buf, &len)) return FileUtil::WideToUtf8(buf, len);
     return {};
 #else
     char buf[256] = {};
@@ -894,6 +894,15 @@ std::string CmdCabinetConnect(const Cabinet::ConnectRequest& request) {
     if (credPath.empty()) return JsonError("Cannot determine credential path");
     auto store = CreateTokenStore();
     if (!store) return JsonError("Credential store unavailable");
+
+    // A fresh install has no config directory yet (always the case on
+    // Windows before the first connect).
+    for (const std::string& file : {credPath, configPath}) {
+        std::error_code ec;
+        const auto dir = FileUtil::Utf8ToPath(file).parent_path();
+        if (!dir.empty() && !std::filesystem::create_directories(dir, ec) && ec)
+            return JsonError("Cannot create the folder for " + file);
+    }
 
     // Network last before writing: a redeemed pairing code is spent, so all
     // local preconditions are checked first.

@@ -12,7 +12,9 @@
 #include <algorithm>
 #include <cstring>
 #include <thread>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <unordered_set>
 #include <condition_variable>
 #include <memory>

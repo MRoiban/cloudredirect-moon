@@ -67,7 +67,8 @@ inline constexpr const char* kDefaultPairingServer = "https://cabinet.mc2.onl";
 bool NormalizePairingCode(const std::string& input, std::string& outCode);
 
 // Hostname -> deviceName for /api/pair: trimmed, control characters dropped,
-// at most 100 bytes (cut on a UTF-8 boundary); "Steam Deck" when empty.
+// at most 100 bytes (cut on a UTF-8 boundary); when empty, "Windows PC" on
+// Windows and "Steam Deck" on Linux.
 std::string PairingDeviceName(const std::string& hostname);
 
 // What `cabinet-connect` was asked to do, parsed from its arguments.

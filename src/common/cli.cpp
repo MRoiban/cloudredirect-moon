@@ -30,7 +30,7 @@
 
 #ifdef _WIN32
 #include <Windows.h>
-#include <Shlobj.h>
+#include <ShlObj.h>
 #else
 #include <unistd.h>
 #include <pwd.h>

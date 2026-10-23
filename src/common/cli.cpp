@@ -895,6 +895,15 @@ std::string CmdCabinetConnect(const Cabinet::ConnectRequest& request) {
     auto store = CreateTokenStore();
     if (!store) return JsonError("Credential store unavailable");
 
+    // A fresh install has no config directory yet (always the case on
+    // Windows before the first connect).
+    for (const std::string& file : {credPath, configPath}) {
+        std::error_code ec;
+        const auto dir = FileUtil::Utf8ToPath(file).parent_path();
+        if (!dir.empty() && !std::filesystem::create_directories(dir, ec) && ec)
+            return JsonError("Cannot create the folder for " + file);
+    }
+
     // Network last before writing: a redeemed pairing code is spent, so all
     // local preconditions are checked first.
     std::string userId, userName, err;

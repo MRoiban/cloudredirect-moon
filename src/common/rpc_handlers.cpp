@@ -2199,7 +2199,9 @@ static void AdoptLocalSaves(uint32_t accountId, uint32_t appId, uint64_t targetC
     uint64_t batchId = BatchTracker_NextId();
     PrepareBatchCanonicalTokens(accountId, appId);
     PendingOpsJournal::RecordUploadBatchStart(accountId, appId);
-    BatchTracker_Begin(accountId, appId, batchId, targetCN, /*appBuildId=*/0, (int)files.size(), 0);
+    // The installed build is the best record of which build wrote these saves.
+    BatchTracker_Begin(accountId, appId, batchId, targetCN,
+                       AutoCloudScan::InstalledBuildId(steamPath, appId), (int)files.size(), 0);
     auto abort = [&](const std::string& why) {
         LOG("[NS-ADOPT] app=%u: aborted (%s); Steam's record and the cloud stay as they were",
             appId, why.c_str());
@@ -2237,6 +2239,8 @@ static void AdoptLocalSaves(uint32_t accountId, uint32_t appId, uint64_t targetC
         LOG("[NS-ADOPT] app=%u: commit failed; Steam's next sync retries the adoption", appId);
         return;
     }
+    // The cloud may have lost the root/file tokens other PCs need to place these files.
+    CloudStorage::RepublishTokens(accountId, appId);
     // Steam's next changelist must read the adopted state, not the cached empty delta.
     {
         const uint64_t key = MakeAppAccountKey(accountId, appId);

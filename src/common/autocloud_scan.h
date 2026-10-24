@@ -40,6 +40,9 @@ ScanResult GetFileList(const std::string& steamPath,
 // Returns true if appmanifest_<appId>.acf exists in any library.
 bool IsAppInstalled(const std::string& steamPath, uint32_t appId);
 
+// Installed build id from appmanifest_<appId>.acf in any Steam library; 0 if unknown.
+uint64_t InstalledBuildId(const std::string& steamPath, uint32_t appId);
+
 // Parse AutoCloud savefiles rules from appinfo.vdf for KV injection.
 std::vector<AutoCloudUtil::AutoCloudRuleNative> GetRules(
     const std::string& steamPath, uint32_t appId, uint32_t accountId = 0);

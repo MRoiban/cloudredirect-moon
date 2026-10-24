@@ -135,6 +135,33 @@ bool SaveFileTokens(uint32_t accountId, uint32_t appId,
     return localOk;
 }
 
+void RepublishTokens(uint32_t accountId, uint32_t appId) {
+    if (!g_tokenProvider) return;
+    std::lock_guard<std::mutex> persistLock(g_tokenPersistMutex);
+    auto roots = LocalMetadataStore::LoadRootTokens(accountId, appId);
+    if (!roots.empty()) {
+        std::string content;
+        for (auto& t : roots) content += t + "\n";
+        CloudWorkQueue::WorkItem wi;
+        wi.type = CloudWorkQueue::WorkItem::Upload;
+        wi.cloudPath = CloudMetadataPath(accountId, appId, kRootTokenFilename);
+        wi.data.assign(content.begin(), content.end());
+        CloudWorkQueue::EnqueueWork(std::move(wi));
+    }
+    auto files = LocalMetadataStore::LoadFileTokens(accountId, appId, roots);
+    if (!files.empty()) {
+        std::string content;
+        for (auto& [cleanName, token] : files) content += cleanName + "\t" + token + "\n";
+        CloudWorkQueue::WorkItem wi;
+        wi.type = CloudWorkQueue::WorkItem::Upload;
+        wi.cloudPath = CloudMetadataPath(accountId, appId, kFileTokensFilename);
+        wi.data.assign(content.begin(), content.end());
+        CloudWorkQueue::EnqueueWork(std::move(wi));
+    }
+    LOG("[TokenStore] RepublishTokens app %u: %zu root token(s), %zu file token(s) queued",
+        appId, roots.size(), files.size());
+}
+
 std::unordered_map<std::string, std::string> LoadFileTokens(uint32_t accountId, uint32_t appId) {
     auto localFileTokens = LocalMetadataStore::LoadFileTokens(accountId, appId);
     if (!localFileTokens.empty() || !g_tokenProvider || !g_tokenProvider->IsAuthenticated())

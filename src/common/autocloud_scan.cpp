@@ -617,6 +617,25 @@ bool IsAppInstalled(const std::string& steamPath, uint32_t appId) {
     return false;
 }
 
+uint64_t InstalledBuildId(const std::string& steamPath, uint32_t appId) {
+    for (const auto& libPath : GetSteamLibraryPaths(steamPath)) {
+        auto manifestPath = libPath / "steamapps" / ("appmanifest_" + std::to_string(appId) + ".acf");
+        std::ifstream in(manifestPath);
+        if (!in) continue;
+        std::string line;
+        while (std::getline(in, line)) {
+            // "buildid"		"26135599"
+            auto key = line.find("\"buildid\"");
+            if (key == std::string::npos) continue;
+            auto open = line.find('"', key + 9);
+            auto close = open == std::string::npos ? std::string::npos : line.find('"', open + 1);
+            if (close == std::string::npos) break;
+            try { return std::stoull(line.substr(open + 1, close - open - 1)); } catch (...) { break; }
+        }
+    }
+    return 0;
+}
+
 ScanResult GetFileList(const std::string& steamPath,
                        uint32_t accountId, uint32_t appId) {
     ScanResult outResult;

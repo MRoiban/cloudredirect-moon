@@ -545,6 +545,22 @@ static std::string GetMachineName() {
 
 
 // Returns the blob-store file list; Steam compares vs. remotecache.vdf.
+// Adopting this PC's saves when Steam's sync record is ahead of an empty cloud.
+// Steam keeps a per-app record (remotecache.vdf) of the change number it last
+// synced. When the provider holds nothing for the app (a provider just switched
+// to, a cloud copy deleted from the server, or a record left from Valve's cloud),
+// "empty at CN 0" looks to Steam like the cloud went backwards: every sync fails
+// in BYieldingBuildFileListToSync and files it believes synced never upload. This
+// PC's files are then the only copy, so they are uploaded through a normal batch
+// at Steam's own CN, after which the cloud matches Steam's record.
+static std::mutex g_adoptMutex;
+static std::unordered_set<uint64_t> g_adoptingApps;
+static bool IsAdoptingLocalSaves(uint32_t accountId, uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_adoptMutex);
+    return g_adoptingApps.count(MakeAppAccountKey(accountId, appId)) > 0;
+}
+static void StartAdoptLocalSaves(uint32_t accountId, uint32_t appId, uint64_t targetCN);
+
 RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqBody) {
     SetRpcCrashContext("GetChangelist:entry", "Cloud.GetAppFileChangelist#1", appId);
     auto* cnField = PB::FindField(reqBody, 2);
@@ -729,6 +745,17 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
         LOG("[NS-CL] GetAppFileChangelist app=%u: INCONCLUSIVE cloud fetch -- serving %zu "
             "local files as delta at CN=%llu (clientCN=%llu); will NOT signal cloud-empty",
             appId, files.size(), serverChangeNumber, clientChangeNumber);
+    } else if (haveCloudManifest && cloudManifest.empty() && cloudCN == 0 &&
+               clientChangeNumber > 0 && CloudStorage::IsCloudActive()) {
+        // Steam last synced at clientCN but the cloud is empty. Answering "empty at
+        // CN 0" fails every Steam sync; an empty delta at Steam's own CN neither
+        // signals cloud-empty nor regresses CN, and adoption fills the cloud.
+        serverChangeNumber = clientChangeNumber;
+        responseIsDelta = true;
+        StartAdoptLocalSaves(accountId, appId, clientChangeNumber);
+        LOG("[NS-CL] GetAppFileChangelist app=%u: cloud is empty but Steam last synced CN=%llu; "
+            "serving an empty delta at that CN and adopting this PC's saves",
+            appId, (unsigned long long)clientChangeNumber);
     } else if (haveCloudManifest && cloudManifest.empty() && cloudCN == 0) {
         // New app at CN=0 -- return empty authoritative inventory
         serverChangeNumber = cloudCN;
@@ -1426,6 +1453,11 @@ RpcResult HandleBeginBatch(uint32_t appId, const std::vector<PB::Field>& reqBody
         // Fail early: error skips CompleteBatch, preventing orphaned local blobs.
         return RpcResult(PB::Writer(), kEResultFail);
     }
+    if (IsAdoptingLocalSaves(accountId, appId)) {
+        // One batch per app at a time; Steam retries once the adoption is committed.
+        LOG("[NS] BeginBatch app=%u: adopting this PC's saves, failing batch; Steam will retry", appId);
+        return RpcResult(PB::Writer(), kEResultFail);
+    }
 
     // If a previous batch's cloud publish is still in-flight, wait for it so
     // FetchCloudStateForServe sees the fresh CN. Typically a no-op (single batch)
@@ -1845,63 +1877,10 @@ static std::vector<std::string> ApplyNativeOverQuotaEviction(
 }
 
 // CompleteAppUploadBatchBlocking
-RpcResult HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& reqBody) {
-    auto completeInfo = CloudRpcUtils::ParseCompleteBatchRequest(reqBody);
-
-    // Times each step ([T+Nms] in the log) -- runs on Steam's BMainLoop thread, so a
-    // total near the 15s watchdog pinpoints what stalled.
-    auto t0 = std::chrono::steady_clock::now();
-    auto elapsedMs = [t0]() -> long long {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
-    };
-
-    // Increment CN once per batch; cloud publish detached.
-    uint32_t accountId = 0;
-    if (!RequireAccountId("CompleteAppUploadBatchBlocking", appId, accountId)) {
-        return PB::Writer();
-    }
-
-    UploadBatchState batch = BatchTracker_Get(accountId, appId, completeInfo.batchId);
-    if (batch.batchId == 0) {
-        LOG("[NS] CompleteBatch app=%u requested batch %llu but no active batch exists",
-            appId, (unsigned long long)completeInfo.batchId);
-        PendingOpsJournal::RecordUploadBatchInterrupted(accountId, appId);
-        ClearBatchCanonicalTokens(accountId, appId);
-        return PB::Writer();
-    }
-    if (completeInfo.hasResult && completeInfo.result != 1) {
-        LOG("[NS] CompleteBatch app=%u batch=%llu FAILED: Steam reported result=%u (expected 1=OK)",
-            appId, (unsigned long long)batch.batchId, completeInfo.result);
-        LOG("[NS] CompleteBatch DIAG app=%u: declared %d upload(s) + %d delete(s) at BeginBatch; "
-            "CR completed %zu upload(s) + %zu delete(s)",
-            appId, batch.declaredUploads, batch.declaredDeletes,
-            batch.uploads.size(), batch.deletes.size());
-        if (!batch.uploads.empty()) {
-            for (const auto& f : batch.uploads)
-                LOG("[NS] CompleteBatch DIAG   upload completed: %s (%llu bytes)",
-                    f.c_str(), batch.uploadMeta.count(f) ? (unsigned long long)batch.uploadMeta.at(f).size : 0ULL);
-        }
-        if (!batch.deletes.empty()) {
-            for (const auto& f : batch.deletes)
-                LOG("[NS] CompleteBatch DIAG   delete completed: %s", f.c_str());
-        }
-        LOG("[NS] CompleteBatch DIAG app=%u: raw CompleteBatch protobuf fields:", appId);
-        for (const auto& field : reqBody)
-            LOG("[NS] CompleteBatch DIAG   field=%u wireType=%u varint=%llu dataLen=%u",
-                field.fieldNum, field.wireType, (unsigned long long)field.varintVal, field.dataLen);
-        if ((int)batch.uploads.size() == batch.declaredUploads &&
-            (int)batch.deletes.size() == batch.declaredDeletes) {
-            LOG("[NS] CompleteBatch DIAG app=%u: *** ALL OPS COMPLETED ON CR SIDE but Steam says failure - "
-                "possible: Steam HTTP timeout despite CR receiving data, or proto field mismatch ***", appId);
-        }
-        PendingOpsJournal::RecordUploadBatchInterrupted(accountId, appId);
-        BatchTracker_Clear(accountId, appId, batch.batchId);
-        ClearBatchCanonicalTokens(accountId, appId);
-        ClearFileTokensDirty(accountId, appId);
-        return PB::Writer();
-    }
-
+// Commit an upload batch whose blobs are staged: promote them, advance the local CN
+// and manifest, then publish cloud state in the background. Returns the new CN, or 0
+// when nothing was committed. Shared by Steam's CompleteBatch and AdoptLocalSaves.
+static uint64_t CommitUploadBatch(uint32_t accountId, uint32_t appId, UploadBatchState batch) {
     // Drain deferred file-token persists for this app only.
     {
         uint64_t key = MakeAppAccountKey(accountId, appId);
@@ -1942,7 +1921,7 @@ RpcResult HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& reqB
         LOG("[NS] CompleteBatch app=%u: inflight-sync scope refused entry (shutting down?)", appId);
         BatchTracker_Clear(accountId, appId, batch.batchId);
         ClearBatchCanonicalTokens(accountId, appId);
-        return PB::Writer();
+        return 0;
     }
 
     // Promote on background thread, PumpUntil it finishes (mirrors native YldUploadFiles).
@@ -1974,7 +1953,7 @@ RpcResult HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& reqB
         PendingOpsJournal::RecordUploadBatchInterrupted(accountId, appId);
         BatchTracker_Clear(accountId, appId, batch.batchId);
         ClearBatchCanonicalTokens(accountId, appId);
-        return PB::Writer();
+        return 0;
     }
 
     // Advance the local CN/manifest now that the blobs are durable.
@@ -2181,10 +2160,175 @@ RpcResult HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& reqB
     }).detach();
 
     BatchTracker_Clear(accountId, appId, batch.batchId);
-    LOG("[NS] CompleteBatch app=%u CN=%llu returned to Steam in %lldms "
-        "(publish deferred, barrier at session release)",
-        appId, (unsigned long long)newCN, elapsedMs());
     ClearBatchCanonicalTokens(accountId, appId);
+    return newCN;
+}
+
+static void AdoptLocalSaves(uint32_t accountId, uint32_t appId, uint64_t targetCN) {
+    // Re-check live: another PC may have published since the changelist fetch.
+    auto live = CloudStorage::FetchCloudState(accountId, appId);
+    bool cloudEmpty = live.status == CloudStorage::StateFetchStatus::NotFound ||
+        (live.status == CloudStorage::StateFetchStatus::Ok &&
+         live.state.cn == 0 && live.state.files.empty());
+    if (!cloudEmpty) {
+        LOG("[NS-ADOPT] app=%u: cloud is no longer empty (status=%d), nothing to adopt",
+            appId, static_cast<int>(live.status));
+        return;
+    }
+    if (BatchTracker_ActiveId(accountId, appId) != 0) {
+        LOG("[NS-ADOPT] app=%u: a Steam upload batch is active, skipping", appId);
+        return;
+    }
+    std::string steamPath = CloudIntercept::GetSteamPath();
+    if (steamPath.empty()) return;
+    auto scan = AutoCloudScan::GetFileList(steamPath, accountId, appId);
+    if (!scan.complete) {
+        // A truncated or colliding scan would publish a partial save set.
+        LOG("[NS-ADOPT] app=%u: Auto-Cloud scan incomplete (collision=%d), skipping",
+            appId, scan.hasRootCollision ? 1 : 0);
+        return;
+    }
+    std::vector<AutoCloudScan::FileEntry> files;
+    for (const auto& fe : scan.files)
+        if (!fe.relativePath.empty() && !IsReservedBlobFilename(fe.relativePath)) files.push_back(fe);
+    if (files.empty()) {
+        LOG("[NS-ADOPT] app=%u: no local save files, nothing to adopt", appId);
+        return;
+    }
+
+    uint64_t batchId = BatchTracker_NextId();
+    PrepareBatchCanonicalTokens(accountId, appId);
+    PendingOpsJournal::RecordUploadBatchStart(accountId, appId);
+    BatchTracker_Begin(accountId, appId, batchId, targetCN, /*appBuildId=*/0, (int)files.size(), 0);
+    auto abort = [&](const std::string& why) {
+        LOG("[NS-ADOPT] app=%u: aborted (%s); Steam's record and the cloud stay as they were",
+            appId, why.c_str());
+        PendingOpsJournal::RecordUploadBatchInterrupted(accountId, appId);
+        BatchTracker_Clear(accountId, appId, batchId);
+        ClearBatchCanonicalTokens(accountId, appId);
+    };
+    uint64_t totalBytes = 0;
+    for (const auto& fe : files) {
+        std::vector<uint8_t> data;
+        {
+            std::ifstream in(FileUtil::LongPath(FileUtil::Utf8ToPath(fe.fullPath)), std::ios::binary);
+            if (!in) return abort("cannot read " + fe.relativePath);
+            data.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            if (in.bad()) return abort("read error on " + fe.relativePath);
+        }
+        // Hash the bytes actually uploaded; the scan's hash may predate a write.
+        auto sha = FileUtil::SHA1(data.data(), data.size());
+        std::string token = CanonicalizeUploadRootToken(accountId, appId, fe.relativePath, fe.rootToken);
+        TryCaptureRootToken(accountId, appId, token);
+        if (!CloudStorage::StoreBlobStaged(accountId, appId, batchId, fe.relativePath,
+                                           data.empty() ? nullptr : data.data(), data.size()))
+            return abort("cannot stage " + fe.relativePath);
+        if (RecordFileToken(accountId, appId, fe.relativePath, token))
+            MarkFileTokensDirty(accountId, appId);
+        BatchTracker_RecordFilePlatforms(accountId, appId, fe.relativePath, 0xFFFFFFFFu);
+        BatchTracker_RecordUpload(accountId, appId, fe.relativePath, sha, data.size(), fe.modifiedTime);
+        totalBytes += data.size();
+        LOG("[NS-ADOPT] app=%u: staged %s%s (%zu bytes)",
+            appId, token.c_str(), fe.relativePath.c_str(), data.size());
+    }
+
+    uint64_t cn = CommitUploadBatch(accountId, appId, BatchTracker_Get(accountId, appId, batchId));
+    if (cn == 0) {
+        LOG("[NS-ADOPT] app=%u: commit failed; Steam's next sync retries the adoption", appId);
+        return;
+    }
+    // Steam's next changelist must read the adopted state, not the cached empty delta.
+    {
+        const uint64_t key = MakeAppAccountKey(accountId, appId);
+        std::lock_guard<std::mutex> lock(g_fullManifestSentMutex);
+        g_fullManifestSentApps.erase(key);
+        g_cachedCloudCN.erase(key);
+        g_cachedAppBuildIdHwm.erase(key);
+    }
+    LOG("[NS-ADOPT] app=%u: adopted %zu file(s), %llu bytes, at CN=%llu (Steam's record); publishing",
+        appId, files.size(), (unsigned long long)totalBytes, (unsigned long long)cn);
+}
+
+static void StartAdoptLocalSaves(uint32_t accountId, uint32_t appId, uint64_t targetCN) {
+    const uint64_t key = MakeAppAccountKey(accountId, appId);
+    {
+        std::lock_guard<std::mutex> lock(g_adoptMutex);
+        if (!g_adoptingApps.insert(key).second) return;   // already running
+    }
+    std::thread([accountId, appId, targetCN, key]() {
+        CloudStorage::InflightSyncScope guard;   // never touch storage during teardown
+        if (guard.entered) {
+            try { AdoptLocalSaves(accountId, appId, targetCN); }
+            catch (const std::exception& e) { LOG("[NS-ADOPT] app=%u: exception: %s", appId, e.what()); }
+            catch (...) { LOG("[NS-ADOPT] app=%u: unknown exception", appId); }
+        }
+        std::lock_guard<std::mutex> lock(g_adoptMutex);
+        g_adoptingApps.erase(key);
+    }).detach();
+}
+
+RpcResult HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& reqBody) {
+    auto completeInfo = CloudRpcUtils::ParseCompleteBatchRequest(reqBody);
+
+    // Times each step ([T+Nms] in the log) -- runs on Steam's BMainLoop thread, so a
+    // total near the 15s watchdog pinpoints what stalled.
+    auto t0 = std::chrono::steady_clock::now();
+    auto elapsedMs = [t0]() -> long long {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+    };
+
+    // Increment CN once per batch; cloud publish detached.
+    uint32_t accountId = 0;
+    if (!RequireAccountId("CompleteAppUploadBatchBlocking", appId, accountId)) {
+        return PB::Writer();
+    }
+
+    UploadBatchState batch = BatchTracker_Get(accountId, appId, completeInfo.batchId);
+    if (batch.batchId == 0) {
+        LOG("[NS] CompleteBatch app=%u requested batch %llu but no active batch exists",
+            appId, (unsigned long long)completeInfo.batchId);
+        PendingOpsJournal::RecordUploadBatchInterrupted(accountId, appId);
+        ClearBatchCanonicalTokens(accountId, appId);
+        return PB::Writer();
+    }
+    if (completeInfo.hasResult && completeInfo.result != 1) {
+        LOG("[NS] CompleteBatch app=%u batch=%llu FAILED: Steam reported result=%u (expected 1=OK)",
+            appId, (unsigned long long)batch.batchId, completeInfo.result);
+        LOG("[NS] CompleteBatch DIAG app=%u: declared %d upload(s) + %d delete(s) at BeginBatch; "
+            "CR completed %zu upload(s) + %zu delete(s)",
+            appId, batch.declaredUploads, batch.declaredDeletes,
+            batch.uploads.size(), batch.deletes.size());
+        if (!batch.uploads.empty()) {
+            for (const auto& f : batch.uploads)
+                LOG("[NS] CompleteBatch DIAG   upload completed: %s (%llu bytes)",
+                    f.c_str(), batch.uploadMeta.count(f) ? (unsigned long long)batch.uploadMeta.at(f).size : 0ULL);
+        }
+        if (!batch.deletes.empty()) {
+            for (const auto& f : batch.deletes)
+                LOG("[NS] CompleteBatch DIAG   delete completed: %s", f.c_str());
+        }
+        LOG("[NS] CompleteBatch DIAG app=%u: raw CompleteBatch protobuf fields:", appId);
+        for (const auto& field : reqBody)
+            LOG("[NS] CompleteBatch DIAG   field=%u wireType=%u varint=%llu dataLen=%u",
+                field.fieldNum, field.wireType, (unsigned long long)field.varintVal, field.dataLen);
+        if ((int)batch.uploads.size() == batch.declaredUploads &&
+            (int)batch.deletes.size() == batch.declaredDeletes) {
+            LOG("[NS] CompleteBatch DIAG app=%u: *** ALL OPS COMPLETED ON CR SIDE but Steam says failure - "
+                "possible: Steam HTTP timeout despite CR receiving data, or proto field mismatch ***", appId);
+        }
+        PendingOpsJournal::RecordUploadBatchInterrupted(accountId, appId);
+        BatchTracker_Clear(accountId, appId, batch.batchId);
+        ClearBatchCanonicalTokens(accountId, appId);
+        ClearFileTokensDirty(accountId, appId);
+        return PB::Writer();
+    }
+
+    uint64_t newCN = CommitUploadBatch(accountId, appId, std::move(batch));
+    if (newCN != 0)
+        LOG("[NS] CompleteBatch app=%u CN=%llu returned to Steam in %lldms "
+            "(publish deferred, barrier at session release)",
+            appId, (unsigned long long)newCN, elapsedMs());
 
     PB::Writer body;
     return body;

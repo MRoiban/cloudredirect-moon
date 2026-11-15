@@ -60,31 +60,22 @@ public:
     virtual std::vector<FileInfo> List(const std::string& prefix) = 0;
 
     virtual std::vector<std::string> ListSubfolders(const std::string& prefix) {
-        auto files = List(prefix);
         std::vector<std::string> folders;
-        for (const auto& f : files) {
-            if (f.path.size() <= prefix.size()) continue;
-            std::string rest = f.path.substr(prefix.size());
-            size_t slash = rest.find('/');
-            if (slash == std::string::npos) continue;
-            std::string folder = rest.substr(0, slash);
-            if (std::find(folders.begin(), folders.end(), folder) == folders.end())
-                folders.push_back(folder);
-        }
+        ListSubfoldersChecked(prefix, folders);
         return folders;
     }
 
+    // As ListSubfolders, but false means the listing failed or came back
+    // incomplete, rather than the prefix being empty. Callers that report
+    // results to a user want this. Drive providers override it with a shallow
+    // listing; the default walks ListChecked.
     virtual bool ListSubfoldersChecked(const std::string& prefix,
-                                       std::vector<std::string>& outFolders,
-                                       bool* outComplete = nullptr) {
+                                       std::vector<std::string>& outFolders) {
+        outFolders.clear();
         std::vector<FileInfo> files;
         bool complete = false;
-        if (!ListChecked(prefix, files, &complete)) {
-            outFolders.clear();
-            if (outComplete) *outComplete = false;
+        if (!ListChecked(prefix, files, &complete) || !complete)
             return false;
-        }
-        outFolders.clear();
         for (const auto& file : files) {
             if (file.path.size() <= prefix.size() ||
                 file.path.compare(0, prefix.size(), prefix) != 0) continue;
@@ -97,8 +88,7 @@ public:
                 outFolders.push_back(folder);
         }
         std::sort(outFolders.begin(), outFolders.end());
-        if (outComplete) *outComplete = complete;
-        return complete;
+        return true;
     }
 
     virtual bool ListChecked(const std::string& prefix, std::vector<FileInfo>& outFiles,

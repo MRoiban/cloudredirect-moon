@@ -12,8 +12,8 @@ RUN apt-get update \
       ln -s /usr/lib/llvm-19/bin/$tool /usr/local/bin/$tool; \
     done
 
-RUN curl -fsSL --retry 3 https://github.com/Jake-Shadle/xwin/releases/download/0.6.5/xwin-0.6.5-x86_64-unknown-linux-musl.tar.gz -o /tmp/xwin.tar.gz \
- && echo '9fd53950b064d067f42428a69453b927656cae68dbd7f8d3f86dcb81c80dd22d  /tmp/xwin.tar.gz' | sha256sum -c - \
+RUN curl -fsSL --retry 3 https://github.com/Jake-Shadle/xwin/releases/download/0.10.0/xwin-0.10.0-x86_64-unknown-linux-musl.tar.gz -o /tmp/xwin.tar.gz \
+ && echo 'd870eb4b2f390878af6da1ccd3cf321d22fcb72720984853b4be732ae597fc88  /tmp/xwin.tar.gz' | sha256sum -c - \
  && tar xzf /tmp/xwin.tar.gz -C /tmp \
  && mv /tmp/xwin-*/xwin /usr/local/bin/xwin \
  && rm -rf /tmp/xwin*

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 using System.Text.Json;
 
 namespace CloudRedirect.Services.Providers;
@@ -206,6 +207,17 @@ internal sealed class CliUiCloudProvider : IUiCloudProvider
         }
     }
 
+    /// <summary>
+    /// Real signed bucket request (lists account 0), so bad keys/endpoint fail --
+    /// unlike auth-status, which only parses the credential file. Null = OK.
+    /// </summary>
+    public async Task<string?> TestConnectionAsync(CancellationToken cancel)
+    {
+        var result = await RunCliAsync($"list-remote-app-ids {_provider} 0", cancel);
+        if (result.ExitCode == 0) return null;
+        return TryGetError(result.Output) ?? $"CLI exited with code {result.ExitCode}";
+    }
+
     private async Task<(int ExitCode, string Output)> RunCliAsync(string arguments, CancellationToken cancel)
     {
         // Entire process lifecycle in Task.Run to avoid UI freeze.
@@ -230,6 +242,10 @@ internal sealed class CliUiCloudProvider : IUiCloudProvider
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
+                    // CLI emits UTF-8 JSON; without this .NET decodes via the ANSI
+                    // codepage and non-ASCII paths break the parse on e.g. CP936.
+                    StandardOutputEncoding = Encoding.UTF8,
+                    StandardErrorEncoding = Encoding.UTF8,
                     CreateNoWindow = true,
                 }
             };

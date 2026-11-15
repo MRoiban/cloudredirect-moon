@@ -69,13 +69,12 @@ int main() {
     ListingProvider listing;
     listing.files = { {"77/42/a.sav"}, {"77/42/b.sav"}, {"77/99/c.sav"} };
     std::vector<std::string> folders;
-    bool complete = false;
-    CHECK(listing.ListSubfoldersChecked("77/", folders, &complete) && complete,
+    CHECK(listing.ListSubfoldersChecked("77/", folders),
           "checked folder listing reports a complete provider result");
     CHECK(folders.size() == 2 && folders[0] == "42" && folders[1] == "99",
           "checked folder listing derives unique immediate folders");
     listing.fail = true;
-    CHECK(!listing.ListSubfoldersChecked("77/", folders, &complete) && !complete,
+    CHECK(!listing.ListSubfoldersChecked("77/", folders),
           "checked folder listing preserves provider failures");
 
     if (failures != 0) {

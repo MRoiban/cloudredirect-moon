@@ -170,8 +170,6 @@ if(WIN32)
     add_dependencies(cloud_redirect_cli cloud_redirect)
 
     # Standalone Steam Cloud file manager for a single AppID (default 760).
-    # Self-contained: resolves the steam_api64.dll flat exports at runtime, so it
-    # needs no Steamworks SDK headers/libs. steam_api64.dll must sit next to it.
     add_executable(cloud760_tool
         src/platform/win/cloud760_tool.cpp
     )
@@ -181,9 +179,24 @@ else()
     # Steam on Linux is 32-bit; use LINUX_32BIT=ON when cross-compiling on 64-bit host
     # Match Steam's pre-C++11 ABI
     target_compile_definitions(cloud_redirect PRIVATE _GLIBCXX_USE_CXX11_ABI=0 _FILE_OFFSET_BITS=64)
+    target_compile_options(cloud_redirect PRIVATE -fvisibility=hidden)
+    set_target_properties(cloud_redirect PROPERTIES C_VISIBILITY_PRESET hidden CXX_VISIBILITY_PRESET hidden)
     if(LINUX_32BIT)
         target_compile_options(cloud_redirect PRIVATE -m32)
         target_link_options(cloud_redirect PRIVATE -m32)
+
+        if(NOT DEFINED DEPS32_PREFIX)
+            set(DEPS32_PREFIX "${CMAKE_SOURCE_DIR}/deps/install32")
+        endif()
+        set(DEPS32 "${DEPS32_PREFIX}")
+        target_include_directories(cloud_redirect PRIVATE "${DEPS32}/include")
+        target_link_libraries(cloud_redirect PRIVATE
+            "${DEPS32}/lib/libcurl.a"
+            "${DEPS32}/lib/libssl.a"
+            "${DEPS32}/lib/libcrypto.a"
+        )
+        # Hide static curl/OpenSSL symbols so they can't be interposed.
+        target_link_options(cloud_redirect PRIVATE -Wl,--exclude-libs,ALL)
         target_link_libraries(cloud_redirect PRIVATE atomic)
         # Fix multilib include path for i686 libstdc++ headers on Fedora
         # Try to detect GCC version for correct path
@@ -456,6 +469,14 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tests/autocloud_native_tests.cpp)
             src/platform/linux/token_store_linux.cpp
         )
         target_link_libraries(cloud_storage_staging_tests PRIVATE pthread dl)
+        if(LINUX_32BIT)
+            target_include_directories(cloud_storage_staging_tests PRIVATE "${DEPS32}/include")
+            target_link_libraries(cloud_storage_staging_tests PRIVATE
+                "${DEPS32}/lib/libcurl.a"
+                "${DEPS32}/lib/libssl.a"
+                "${DEPS32}/lib/libcrypto.a"
+            )
+        endif()
     endif()
     add_test(NAME cloud_storage_staging_tests COMMAND cloud_storage_staging_tests)
 
@@ -520,6 +541,29 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tests/autocloud_native_tests.cpp)
         target_link_libraries(stats_store_tests PRIVATE pthread dl)
     endif()
     add_test(NAME stats_store_tests COMMAND stats_store_tests)
+endif()
+
+# Individually-guarded tests, so a partial tests/ tree still builds.
+if(EXISTS ${CMAKE_SOURCE_DIR}/tests/pending_ops_journal_tests.cpp
+   AND NOT TARGET pending_ops_journal_tests)
+    add_executable(pending_ops_journal_tests
+        tests/pending_ops_journal_tests.cpp
+        src/common/pending_ops_journal.cpp
+        src/common/json.cpp
+    )
+    target_include_directories(pending_ops_journal_tests PRIVATE src/common)
+    # log.cpp needs this; the dormant block above sets it via add_compile_definitions,
+    # which does not reach targets defined out here.
+    target_compile_definitions(pending_ops_journal_tests PRIVATE
+        CR_RELEASE_VERSION="${CR_RELEASE_VERSION}")
+    if(WIN32)
+        target_include_directories(pending_ops_journal_tests PRIVATE src/platform/win)
+        target_sources(pending_ops_journal_tests PRIVATE src/platform/win/log.cpp src/platform/win/platform_win.cpp)
+    else()
+        target_include_directories(pending_ops_journal_tests PRIVATE src/platform/linux)
+        target_sources(pending_ops_journal_tests PRIVATE src/platform/linux/log.cpp src/platform/linux/platform_linux.cpp)
+    endif()
+    add_test(NAME pending_ops_journal_tests COMMAND pending_ops_journal_tests)
 endif()
 
 # ── UI (Windows only) ───────────────────────────────────────────────────

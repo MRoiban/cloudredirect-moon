@@ -289,15 +289,14 @@ static bool EnsureAppQuotaInjected(uint32_t accountId, uint32_t appId,
 
 // Inject savefiles rules so AC exit-sync builds a valid file-root tree.
 // Without this, namespace apps get all files deleted ("no longer matches patterns").
-static std::unordered_set<uint32_t> g_saveFilesInjected;
+//
+// Not memoized: Steam can rebuild an app's in-memory appinfo at any time, dropping rules
+// we injected, and a one-shot flag would then leave the exit sync with no rule. The
+// injector skips a populated savefiles node, so repeating it is idempotent; the mutex
+// only keeps two RPC threads from editing the same KV together.
 static std::mutex g_saveFilesInjectedMutex;
 
 static void EnsureSaveFilesInjected(uint32_t appId) {
-    {
-        std::lock_guard<std::mutex> lock(g_saveFilesInjectedMutex);
-        if (g_saveFilesInjected.count(appId)) return;
-    }
-
     if (!SteamKvInjector::IsReady()) return;
 
     std::string steamPath = CloudIntercept::GetSteamPath();
@@ -318,10 +317,8 @@ static void EnsureSaveFilesInjected(uint32_t appId) {
         kvRules.push_back(std::move(sr));
     }
 
-    if (SteamKvInjector::InjectSaveFiles(appId, kvRules)) {
-        std::lock_guard<std::mutex> lock(g_saveFilesInjectedMutex);
-        g_saveFilesInjected.insert(appId);
-    }
+    std::lock_guard<std::mutex> lock(g_saveFilesInjectedMutex);
+    SteamKvInjector::InjectSaveFiles(appId, kvRules);
 }
 
 // g_lastVerifiedCN removed -- session lock in unified state file prevents concurrent writes.
@@ -715,6 +712,10 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
     uint64_t serverChangeNumber = 0;  // Initialize to prevent UB in edge cases
     bool responseIsDelta = true;
 
+    const uint64_t guardLocalCN = LocalStorage::GetChangeNumber(accountId, appId);
+    const bool interruptedUpload =
+        PendingOpsJournal::HasInterruptedUpload(accountId, appId);
+
     if (inconclusiveFetch) {
         // Cloud state unknown: serve local files as a pure delta (is_only_delta=1)
         // so Steam never reconcile-deletes or treats it as cloud-empty. Don't rewind CN.
@@ -741,6 +742,15 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
         LOG("[NS-CL] GetAppFileChangelist app=%u: cloud manifest is empty at CN=%llu, "
             "returning empty authoritative (native advances local CN to match)",
             appId, cloudCN);
+    } else if (haveCloudManifest && !cloudManifest.empty() && interruptedUpload &&
+               cloudCN <= guardLocalCN && clientChangeNumber >= cloudCN) {
+        SetRpcCrashContext("GetChangelist:interrupted-upload", "Cloud.GetAppFileChangelist#1", appId);
+        serverChangeNumber = clientChangeNumber > cloudCN ? clientChangeNumber : cloudCN;
+        responseIsDelta = true;
+        LOG("[NS-CL] GetAppFileChangelist app=%u: interrupted upload (cloudCN=%llu <= "
+            "localCN=%llu, %zu cloud files); returning empty delta at CN=%llu to protect "
+            "unpublished local content",
+            appId, cloudCN, guardLocalCN, cloudManifest.size(), serverChangeNumber);
     } else if (haveCloudManifest && !cloudManifest.empty()) {
         SetRpcCrashContext("GetChangelist:manifest-delta", "Cloud.GetAppFileChangelist#1", appId);
         // Steam-faithful delta: compute diff between clientCN snapshot and current manifest.
@@ -1306,11 +1316,10 @@ RpcResult HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqBo
         }
     }
 
+    // Don't clear UploadPending here: this runs before GetAppFileChangelist reads the
+    // marker. RecordLaunchIntent re-persists it and honours ignorePendingOperations.
     auto pending = PendingOpsJournal::RecordLaunchIntent(
         accountId, appId, currentSession, ignorePendingOperations);
-
-    // Launch intent clears pending-upload state.
-    PendingOpsJournal::ClearUploadPending(accountId, appId);
 
     for (const auto& entry : pending) {
         PB::Writer op;
@@ -2169,9 +2178,12 @@ RpcResult HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& reqB
         }
 
         if (!publishSucceeded) {
-            PendingOpsJournal::RecordUploadBatchEnd(accountId, appId);
-            LOG("[NS] CompleteBatch(pub): all publish attempts exhausted for app %u",
-                appId);
+            // Nothing reached the cloud: downgrade to UploadPending, not clear.
+            // RecordUploadBatchEnd here would drop the marker and let stale cloud
+            // state overwrite unpublished saves.
+            PendingOpsJournal::RecordUploadBatchInterrupted(accountId, appId);
+            LOG("[NS] CompleteBatch(pub): all publish attempts exhausted for app %u "
+                "-- upload left pending", appId);
         }
         // Resolve the barrier BEFORE GC — session release must not wait on housekeeping.
         publishPromise.set_value();

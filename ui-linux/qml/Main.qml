@@ -103,10 +103,14 @@ ApplicationWindow {
         anchors.centerIn: parent
         width: Math.min(parent.width - 80, 440)
 
-        Label {
-            text: "CloudRedirect has been updated. Please restart the application to use the new version."
-            wrapMode: Text.WordWrap
-            width: parent.width
+        ColumnLayout {
+            anchors.fill: parent
+
+            Label {
+                text: "CloudRedirect has been updated. Please restart the application to use the new version."
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
         }
     }
 
@@ -171,13 +175,14 @@ ApplicationWindow {
             Layout.fillWidth: true
 
             // Size each tab to its label so wider labels aren't truncated.
-            TabButton { text: "Dashboard";      width: Math.max(implicitWidth, contentItem.implicitWidth + 24) }
-            TabButton { text: "Apps";           width: Math.max(implicitWidth, contentItem.implicitWidth + 24) }
-            TabButton { text: "Backups";        width: Math.max(implicitWidth, contentItem.implicitWidth + 24) }
-            TabButton { text: "Cloud Provider"; width: Math.max(implicitWidth, contentItem.implicitWidth + 24) }
-            TabButton { text: "Setup";          width: Math.max(implicitWidth, contentItem.implicitWidth + 24) }
-            TabButton { text: "Stats Sync";     width: Math.max(implicitWidth, contentItem.implicitWidth + 24) }
-            TabButton { text: "Migration";      width: Math.max(implicitWidth, contentItem.implicitWidth + 24) }
+            // org.kde.desktop paints without a contentItem, so never read it here.
+            TabButton { text: "Dashboard";      width: implicitWidth }
+            TabButton { text: "Apps";           width: implicitWidth }
+            TabButton { text: "Backups";        width: implicitWidth }
+            TabButton { text: "Cloud Provider"; width: implicitWidth }
+            TabButton { text: "Setup";          width: implicitWidth }
+            TabButton { text: "Stats Sync";     width: implicitWidth }
+            TabButton { text: "Migration";      width: implicitWidth }
         }
 
         StackLayout {
